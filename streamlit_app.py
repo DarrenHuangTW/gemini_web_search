@@ -4,13 +4,17 @@ import json
 import pandas as pd
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from datetime import datetime
 import io
 
 def init_gemini_client(api_key):
     return genai.Client(api_key=api_key)
 
-def process_prompt(client, prompt):
+def init_openai_client(api_key):
+    return OpenAI(api_key=api_key)
+
+def process_prompt_gemini(client, prompt):
     grounding_tool = types.Tool(
         google_search=types.GoogleSearch()
     )
@@ -27,7 +31,8 @@ def process_prompt(client, prompt):
     
     result = {
         "original_prompt": prompt,
-        "google_search_used": False,
+        "provider": "Gemini",
+        "web_search_used": False,
         "web_search_queries": [],
         "cited_sources": [],
         "final_response": ""
@@ -41,7 +46,7 @@ def process_prompt(client, prompt):
         if hasattr(response.candidates[0].grounding_metadata, 'web_search_queries'):
             queries = response.candidates[0].grounding_metadata.web_search_queries
             if queries:
-                result["google_search_used"] = True
+                result["web_search_used"] = True
                 result["web_search_queries"] = [str(query) for query in queries]
         
         # Extract cited sources
@@ -67,13 +72,62 @@ def process_prompt(client, prompt):
     
     return result
 
+def process_prompt_openai(client, prompt):
+    result = {
+        "original_prompt": prompt,
+        "provider": "OpenAI",
+        "web_search_used": False,
+        "web_search_queries": [],
+        "cited_sources": [],
+        "final_response": ""
+    }
+    
+    try:
+        response = client.responses.create(
+            model="gpt-4o",
+            input=prompt,
+            tools=[{"type": "web_search"}]
+        )
+        
+        # Extract query from web search tool call
+        for output in response.output:
+            if hasattr(output, 'action') and hasattr(output.action, 'query'):
+                result["web_search_used"] = True
+                result["web_search_queries"].append(output.action.query)
+        
+        # Extract cited URLs
+        for output in response.output:
+            if hasattr(output, 'content'):
+                for content in output.content:
+                    if hasattr(content, 'annotations'):
+                        for annotation in content.annotations:
+                            if hasattr(annotation, 'url') and hasattr(annotation, 'title'):
+                                result["cited_sources"].append({
+                                    "title": annotation.title,
+                                    "url": annotation.url
+                                })
+        
+        # Extract response text
+        for output in response.output:
+            if hasattr(output, 'content'):
+                for content in output.content:
+                    if hasattr(content, 'text'):
+                        result["final_response"] = content.text
+                        break
+        
+    except Exception as e:
+        result["final_response"] = f"Error: {str(e)}"
+    
+    return result
+
 def create_downloadable_data(results):
     processed_data = []
     
     for result in results:
         processed_data.append({
             "Original Prompt": result["original_prompt"],
-            "Google Search Used": result["google_search_used"],
+            "Provider": result["provider"],
+            "Web Search Used": result["web_search_used"],
             "Number of Queries": len(result["web_search_queries"]),
             "Web Search Queries": "; ".join(result["web_search_queries"]) if result["web_search_queries"] else "",
             "Cited Sources URLs": "; ".join([source["url"] for source in result["cited_sources"]]) if result["cited_sources"] else "",
@@ -85,13 +139,13 @@ def create_downloadable_data(results):
 
 def main():
     st.set_page_config(
-        page_title="Gemini Web Search App", 
+        page_title="Overdose AI Web Search App", 
         page_icon="🔍",
         layout="wide"
     )
     
-    st.title("🔍 Gemini Web Search App")
-    st.markdown("Enter up to 50 prompts to process with Google's Gemini AI and web search capabilities.")
+    st.title("🔍 Overdose AI Web Search App")
+    st.markdown("Enter up to 50 prompts to process with AI models and web search capabilities.")
     
     # Initialize session state
     if 'results' not in st.session_state:
@@ -103,13 +157,32 @@ def main():
     with st.sidebar:
         st.header("🔧 Configuration")
         
-        # API Key input
-        api_key = st.text_input(
-            "Google AI API Key:",
-            type="password",
-            placeholder="Enter your Google AI API key",
-            help="Get your API key from https://aistudio.google.com/app/apikey"
+        # Provider selection
+        provider = st.selectbox(
+            "Choose AI Provider:",
+            ["Gemini", "OpenAI"],
+            help="Select which AI provider to use for web search"
         )
+        
+        # API Key input based on provider
+        if provider == "Gemini":
+            api_key = st.text_input(
+                "Google AI API Key:",
+                type="password",
+                placeholder="Enter your Google AI API key",
+                help="Get your API key from https://aistudio.google.com/app/apikey"
+            )
+            model_info = "**Model:** Gemini 2.5 Flash"
+            features_info = "**Features:** Google Search grounding"
+        else:  # OpenAI
+            api_key = st.text_input(
+                "OpenAI API Key:",
+                type="password",
+                placeholder="Enter your OpenAI API key",
+                help="Get your API key from https://platform.openai.com/api-keys"
+            )
+            model_info = "**Model:** GPT-4o"
+            features_info = "**Features:** Web search capabilities"
         
         if api_key:
             st.success("✅ API key provided")
@@ -118,12 +191,13 @@ def main():
         
         st.divider()
         
-        st.markdown("**Model:** Gemini 2.5 Flash")
-        st.markdown("**Features:** Google Search grounding")
+        st.markdown(f"**Provider:** {provider}")
+        st.markdown(model_info)
+        st.markdown(features_info)
         
         st.divider()
         
-        if st.button("🗑️ Clear All Results", type="secondary", use_container_width=True):
+        if st.button("🗑️ Clear All Results", type="secondary"):
             st.session_state.results = []
             st.session_state.processed_count = 0
             st.rerun()
@@ -146,7 +220,7 @@ def main():
     if process_button and prompts_input.strip():
         # Check if API key is provided
         if not api_key:
-            st.error("❌ Please enter your Google AI API key in the sidebar.")
+            st.error(f"❌ Please enter your {provider} API key in the sidebar.")
             return
         
         prompts = [prompt.strip() for prompt in prompts_input.split('\n') if prompt.strip()]
@@ -159,11 +233,14 @@ def main():
             st.error("Please enter at least one prompt.")
             return
         
-        # Initialize Gemini client
+        # Initialize client based on provider
         try:
-            client = init_gemini_client(api_key)
+            if provider == "Gemini":
+                client = init_gemini_client(api_key)
+            else:  # OpenAI
+                client = init_openai_client(api_key)
         except Exception as e:
-            st.error(f"Failed to initialize Gemini client: {str(e)}")
+            st.error(f"Failed to initialize {provider} client: {str(e)}")
             return
         
         # Process prompts with progress bar
@@ -175,13 +252,17 @@ def main():
             status_text.text(f"Processing prompt {i+1} of {len(prompts)}: {prompt[:50]}...")
             
             try:
-                result = process_prompt(client, prompt)
+                if provider == "Gemini":
+                    result = process_prompt_gemini(client, prompt)
+                else:  # OpenAI
+                    result = process_prompt_openai(client, prompt)
                 results.append(result)
             except Exception as e:
                 st.error(f"Error processing prompt '{prompt}': {str(e)}")
                 results.append({
                     "original_prompt": prompt,
-                    "google_search_used": False,
+                    "provider": provider,
+                    "web_search_used": False,
                     "web_search_queries": [],
                     "cited_sources": [],
                     "final_response": f"Error: {str(e)}"
@@ -201,16 +282,22 @@ def main():
         st.markdown(f"**Total processed prompts:** {st.session_state.processed_count}")
         
         # Summary statistics
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            search_used_count = sum(1 for r in st.session_state.results if r["google_search_used"])
-            st.metric("Prompts using Google Search", search_used_count)
+            search_used_count = sum(1 for r in st.session_state.results if r["web_search_used"])
+            st.metric("Prompts using Web Search", search_used_count)
         with col2:
             total_queries = sum(len(r["web_search_queries"]) for r in st.session_state.results)
             st.metric("Total Search Queries", total_queries)
         with col3:
             total_sources = sum(len(r["cited_sources"]) for r in st.session_state.results)
             st.metric("Total Cited Sources", total_sources)
+        with col4:
+            provider_counts = {}
+            for r in st.session_state.results:
+                provider_counts[r["provider"]] = provider_counts.get(r["provider"], 0) + 1
+            provider_summary = ", ".join([f"{k}: {v}" for k, v in provider_counts.items()])
+            st.metric("Provider Usage", provider_summary)
         
         # Display results in table format
         display_data = []
@@ -233,7 +320,8 @@ def main():
             display_data.append({
                 "ID": i + 1,
                 "Original Prompt": result["original_prompt"],
-                "Google Search Used": "✅ Yes" if result["google_search_used"] else "❌ No",
+                "Provider": result["provider"],
+                "Web Search Used": "✅ Yes" if result["web_search_used"] else "❌ No",
                 "# Queries": len(result["web_search_queries"]),
                 "Web Search Queries": "\n".join(queries_list) if queries_list else "None",
                 "Final Response (300 chars)": truncated_response
@@ -243,12 +331,13 @@ def main():
             df_display = pd.DataFrame(display_data)
             st.dataframe(
                 df_display,
-                use_container_width=True,
+                width='stretch',
                 height=600,
                 column_config={
                     "ID": st.column_config.NumberColumn("ID", width="small"),
                     "Original Prompt": st.column_config.TextColumn("Original Prompt", width="medium"),
-                    "Google Search Used": st.column_config.TextColumn("Search Used", width="small"),
+                    "Provider": st.column_config.TextColumn("Provider", width="small"),
+                    "Web Search Used": st.column_config.TextColumn("Search Used", width="small"),
                     "# Queries": st.column_config.NumberColumn("# Queries", width="small"),
                     "Web Search Queries": st.column_config.TextColumn("Queries", width="medium"),
                     "Final Response (300 chars)": st.column_config.TextColumn("Response", width="large")
@@ -274,7 +363,7 @@ def main():
             st.download_button(
                 label="📄 Download as CSV",
                 data=csv_data,
-                file_name=f"gemini_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                file_name=f"ai_web_search_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
         
@@ -282,9 +371,18 @@ def main():
             st.download_button(
                 label="📋 Download as JSON",
                 data=json_data,
-                file_name=f"gemini_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"ai_web_search_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json"
             )
+    
+    # Footer
+    st.divider()
+    st.markdown(
+        "<div style='text-align: center; color: gray; font-size: 12px; margin-top: 50px;'>"
+        "Built by Darren Huang • Reach out for questions or feature requests"
+        "</div>", 
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main()
